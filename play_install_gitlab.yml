@@ -1,0 +1,496 @@
+# - hosts: "{{ hosts | default('localhost') }}"
+- hosts: gitlab_target
+  gather_facts: true
+  become: true
+  vars:
+    ansible_user: vince
+    ansible_ssh_private_key_file: /home/vince/.ssh/id_rsa
+    gitlab_instance_fqdn: "{{ inventory_hostname }}.me"
+    # gitlab_instance_fqdn: gitlab-1.me
+    gitlab_registry: "registry.{{ gitlab_instance_fqdn }}"
+    gitlab_install_base_path: /srv
+    gitlab_instance_name: "{{ gitlab_instance_fqdn.split('.')[0] }}"
+    gitlab_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}"
+    gitlab_runner_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}_runner"
+    gitlab_api_url: http://{{ gitlab_instance_fqdn }}/api/v4
+    git_project_name: "install_{{ gitlab_instance_name }}_demo"
+    
+  
+  tasks:
+
+  - debug: var=gitlab_instance_fqdn
+  - debug: var=gitlab_registry
+  - debug: var=gitlab_install_base_path
+  # - meta: end_play
+
+  # - setup:
+  #   ignore_unreachable: true
+  #   register: setup_return
+  # - debug: var=setup_return
+
+  - block:
+    - name: check gitlab instance fqdn
+      shell: ping -c 1 {{ gitlab_instance_fqdn }}
+      register: ping_return
+      changed_when: false
+      delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+      become: "{{  false if gitlab_location == 'remote' else true }}"
+    - name: check gitlab registry fqdn
+      shell: ping -c 1 {{ gitlab_registry }}
+      register: ping_return
+      changed_when: false
+      delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+      become: "{{  false if gitlab_location == 'remote' else true }}"
+    rescue:
+    - name: alias check failed
+      debug:
+        msg: |
+          #  Ensure that the following enties are present in /etc/hosts
+          #  for local instance
+          127.0.0.1       {{ gitlab_instance_fqdn }}     {{ gitlab_registry }}
+
+          #  for remote instance
+          {{ ansible_default_ipv4.address }}    {{ gitlab_instance_fqdn }}     {{ gitlab_registry }}
+      failed_when: true
+
+
+  - name: create folder gitlab_install_path
+    file:
+      state: directory
+      path: "{{ gitlab_install_path }}"
+  
+  - name: create docker-compose.yml
+    copy:
+      dest: "{{ gitlab_install_path }}/docker-compose.yml"
+      content: |
+        # version: '3.6'
+        services:
+          gitlab:
+            # image: 'yrzr/gitlab-ce-arm64v8'
+            # image: 'gitlab/gitlab-ee:16.9.0-ee.0'
+            # image: 'gitlab/gitlab-ee:latest'
+            image: {{ gitlab_image }}
+            # restart: always
+            hostname: '{{ gitlab_instance_fqdn }}' 
+            container_name: {{ gitlab_instance_name }}
+            ports:
+              - '80:80'
+              - '443:443'
+              - "{{ gitlab_ssh_port_mapping }}"
+            volumes:
+              - '{{ gitlab_install_path }}/config:/etc/gitlab'
+              - '{{ gitlab_install_path }}/logs:/var/log/gitlab'
+              - '{{ gitlab_install_path }}/data:/var/opt/gitlab'
+            shm_size: '256m'
+          gitlab-runner:
+            image: gitlab/gitlab-runner:latest
+            restart: always
+            hostname: gitlab-runner
+            container_name: gitlab-runner
+            privileged: true
+            # depends_on:
+            #   gitlab:
+            #     condition: service_healthy
+            volumes:
+              - '/var/run/docker.sock:/var/run/docker.sock'
+              - '/srv/{{ gitlab_instance_name }}_runner:/etc/gitlab-runner'
+
+  - name: docker compose up for first install
+    shell: |
+      cd {{ gitlab_install_path }}
+      /usr/bin/docker compose up -d gitlab
+
+  - name: wait for gitlab healthy
+    shell: "docker ps -f name={{ gitlab_instance_name }} -f health=healthy -q"
+    register: get_gitlab_health
+    delay: 10
+    retries: 100
+    until: get_gitlab_health.stdout != ""
+
+  - name: get first password
+    shell: "docker exec -t {{ gitlab_instance_name }} grep 'Password:' /etc/gitlab/initial_root_password | awk '{print $2}'"
+    register: get_password
+    tags: ['always']
+  
+  - debug: var=get_password.stdout
+
+    # sources: https://gist.github.com/michaellihs/5ef5e8dbf48e63e2172a573f7b32c638
+  - name: Create personal access tokens using curl and cookies
+    shell: |
+      #!/bin/bash
+      gitlab_host="http://{{ gitlab_instance_fqdn }}"
+      gitlab_user="root"
+      gitlab_password='{{ get_password.stdout | urlencode  }}'
+
+      # 1. curl for the login page to get a session cookie and the sources with the auth tokens
+      csrf_token=$(curl -c /tmp/cookies.txt -i "${gitlab_host}/users/sign_in" -s \
+      | grep "name=\"authenticity_token\" value=\"" \
+      | sed "s/.*name=\"authenticity_token\" value=\"\([^\"]*\).*/\1/g")
+
+      # 2. send login credentials with curl, using cookies and token from previous request
+      curl -b /tmp/cookies.txt -c /tmp/cookies.txt -i "${gitlab_host}/users/sign_in" \
+        --data "user[login]=${gitlab_user}&user[password]=${gitlab_password}"\
+        --data-urlencode "authenticity_token=${csrf_token}"
+
+      # 3. send curl GET request to personal access token page to get auth token
+      csrf_token=$(curl -H 'user-agent: curl' -b /tmp/cookies.txt -i "${gitlab_host}/-/user_settings/personal_access_tokens" -s \
+      | grep "name=\"csrf-token\" content=\""\
+      | sed "s/.*name=\"csrf-token\" content=\"\([^\"]*\).*/\1/g")
+
+      body_header=$(curl -L -b /tmp/cookies.txt "${gitlab_host}/-/user_settings/personal_access_tokens" \
+        --data-urlencode "authenticity_token=${csrf_token}" \
+        --data 'personal_access_token[name]=golab-generated&personal_access_token[expires_at]=&personal_access_token[scopes][]=api&&personal_access_token[scopes][]=create_runner')
+      echo ""
+      # echo $body_header | jq -r '.new_token'
+      echo $body_header
+    register: create_pat_return
+    tags: ['always']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+  # - debug:
+  #     msg: "{{ (create_pat_return.stdout_lines | last | from_json).active_access_tokens | json_query('[?name == `golab-generated`].id') }}"
+  
+  
+  # - debug:
+  #     msg: "{{ (create_pat_return.stdout_lines | last | from_json).new_token }}"
+
+  - debug: var=create_pat_return
+  
+  - name: set token
+    set_fact:
+      token: "{{ (create_pat_return.stdout_lines | last | from_json).new_token }}"
+    tags: ['always']
+  
+  # - meta: end_play
+  
+  # - name: set token
+  #   set_fact:
+  #     token: "{{ create_pat_return.stdout_lines | last }}"
+  #   tags: ['always']
+    
+
+  - name: stat cert file from local
+    stat:
+      path:  "{{ gitlab_install_path }}/config/ssl/{{ gitlab_registry }}.crt"
+    register: stat_gitlab_cert_return
+
+
+  # - debug: var=stat_gitlab_cert_return.stat.exists
+  # - meta: end_play
+
+
+  - when: stat_gitlab_cert_return.stat.exists == False
+    block:
+    - name: create ssl folder
+      file:
+        state: directory
+        path: "{{ gitlab_install_path }}/config/ssl"
+      tags: ['certs']
+    
+    - name: Generate ceriticates on gitlab host
+      shell: |
+        docker exec -t {{ gitlab_instance_name }} openssl req -newkey rsa:4096 -nodes -sha256 \
+          -keyout /etc/gitlab/ssl/{{ gitlab_registry }}.key \
+          -addext "subjectAltName = DNS:{{ gitlab_registry }}" -x509 -days 365  \
+          -out /etc/gitlab/ssl/{{ gitlab_registry }}.crt \
+          -subj "/C=FR/ST=Paris/L=Paris/O=my_orga/OU=my_lab/CN={{ gitlab_registry }}"
+      tags: ['certs']
+
+  
+
+  - name: setup gitlab registry on gitlab config
+    blockinfile:
+      insertbefore: BOF
+      path: "{{ gitlab_install_path }}/config/gitlab.rb"
+      backup: yes
+      content: |
+        gitlab_rails['gitlab_default_projects_features_container_registry'] = true
+        registry_external_url 'https://{{ gitlab_registry }}'
+
+        gitlab_rails['registry_enabled'] = true
+        gitlab_rails['registry_host'] = "{{ gitlab_registry }}"
+
+        registry_nginx['enable'] = true
+        registry_nginx['listen_port'] = 443
+
+        nginx['ssl_certificate'] = "/etc/gitlab/ssl/{{ gitlab_registry }}.crt"
+        nginx['ssl_certificate_key'] = "/etc/gitlab/ssl/{{ gitlab_registry }}.key"
+    tags: ['certs']
+    register: set_registry
+
+  # - debug:
+  #     msg: "{{ set_registry }}"
+
+  # - meta: end_play
+
+  - name: gitlabctl reconfigure
+    shell: "docker exec -t {{ gitlab_instance_name }} gitlab-ctl reconfigure"
+    register: gitlabctl_reconfigure
+    when: set_registry.changed
+    tags: ['certs']
+
+  
+  - name: check git_project_name exists
+    uri:
+      url: "{{ gitlab_api_url }}/search?scope=projects&search={{ git_project_name }}"
+      validate_certs: False
+      method: GET
+      body_format: json
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+    register: get_projects
+    until: get_projects.status == 200
+    delay: 10
+    retries: 10
+    tags: ['always']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+  
+  # - debug: var=get_projects
+  # - meta: end_play
+
+
+  - debug:
+      msg: "{{ get_projects.json | map(attribute='name') | list }}"
+    tags: ['projects']
+
+
+  - name: create project if not present
+    uri:
+      url: "{{ gitlab_api_url }}/projects"
+      validate_certs: False
+      method: POST
+      body_format: json
+      status_code: [201]
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+      body:
+        name: "{{ git_project_name }}"
+    register: create_project
+    when: git_project_name not in (get_projects.json | map(attribute='name'))
+    tags: ['projects','always']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+
+  
+  - name: set git_project and git_project_url vars
+    set_fact:
+      git_project: "{{ git_project }}"
+      git_project_url: "{{ git_project_url }}"
+    vars:
+      git_project_url: "{{ gitlab_api_url }}/projects/{{ git_project.namespace.full_path }}%2F{{ git_project.name }}"
+      git_project: "{{ get_projects.json[0]
+                      if git_project_name in (get_projects.json | map(attribute='name'))
+                      else create_project.json
+                        }}"
+    tags: ['projects','always']
+
+  - name: list files from project
+    uri:
+      url: "{{ gitlab_api_url }}/projects/{{ git_project.id }}/repository/tree"
+      # url: "{{ gitlab_api_url }}/root/{{ git_project_name }}"
+      validate_certs: False
+      method: GET
+      body_format: json
+      status_code: [200,404]
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+    register: list_project_files
+    tags: ['projects']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+  # - debug:  var=list_project_files.json
+  # - debug:  var=gitlab_api_url
+
+  # - meta: end_play
+
+
+  - name: create file if not exists
+    uri:
+      url: "{{ gitlab_api_url }}/projects/{{ git_project.id }}/repository/commits"
+      validate_certs: False
+      method: POST
+      body_format: json
+      status_code: [201]
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+      body:
+        branch: "main"
+        commit_message: creating
+        actions:
+          - action: "{{ 'create' if file_to_create.file_path not in (list_project_files.json | map(attribute='name',default=[]) | default([]) ) else 'update' }}"
+            file_path: "{{ file_to_create.file_path }}"
+            content:  "{{ file_to_create.content }}"
+    loop_control:
+      loop_var: file_to_create
+    loop:
+      - file_path: README.md
+        content:  coucou
+      - file_path: .gitlab-ci.yml
+        content:  |
+          default:
+            tags:
+              - docker
+          build image:
+              image: docker
+              services:
+              - docker:dind
+              variables:
+                DOCKER_DRIVER: overlay2
+                DOCKER_TLS_CERTDIR: ""
+              script:
+              - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+              - docker build -t $CI_REGISTRY_IMAGE/toto .
+              - docker push $CI_REGISTRY_IMAGE/toto
+          test:
+              image: {{ gitlab_registry }}/root/{{ git_project_name }}/toto:latest
+              script:
+                - echo "toto"
+      - file_path: Dockerfile
+        content: |
+          FROM ubuntu
+          RUN apt-get update \
+              && apt-get install -y nginx
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+
+  - name: test docker registry connection
+    shell: "echo '{{ get_password.stdout }}' | docker login {{ gitlab_registry }} --username root --password-stdin"
+    tags: ['docker_registry']
+    ignore_errors: true
+
+
+
+  - name: list_existing_runners_with_docker_tag
+    uri:
+      url: "{{ gitlab_api_url }}/runners?tag_list=docker"
+      validate_certs: False
+      method: GET
+      body_format: json
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+    register: list_existing_runners_with_docker_tag
+    tags: ['runners']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+
+  - debug: var=list_existing_runners_with_docker_tag
+
+
+  - name: remove runner if exists with tag docker
+    uri:
+      url: "{{ gitlab_api_url }}/runners/{{ item.id }}/"
+      validate_certs: False
+      status_code: [204]
+      method: DELETE
+      body_format: json
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+    register: declare_docker_runners_retrurn
+    loop: "{{ list_existing_runners_with_docker_tag.json }}"
+    tags: ['runners']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+  # - meta: end_play
+
+
+
+  - name: declare docker runner on gitlab
+    uri:
+      # url: "{{ gitlab_api_url }}/root/runners"
+      url: "{{ gitlab_api_url }}/user/runners/"
+      validate_certs: False
+      status_code: [201]
+      method: POST
+      body_format: json
+      headers:
+        Content-Type: application/json
+        PRIVATE-TOKEN: "{{ token }}"
+      body:
+        tag_list: ['docker']
+        runner_type: project_type
+        project_id: "{{ git_project.id }}"
+        Name: roger
+    register: declare_docker_runners_retrurn
+    tags: ['runners']
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
+
+  - debug: var=declare_docker_runners_retrurn.json.token
+    tags: ['runners']
+
+  - name: create gitlab_runner_install_path folder
+    file:
+      state: directory
+      path: "{{ gitlab_runner_install_path }}"
+    tags: ['runners']
+
+  - name: create gitlab-runner config
+    copy:
+      dest: "{{ gitlab_runner_install_path }}/config.toml"
+      content: |
+        concurrent = 1
+        check_interval = 0
+        shutdown_timeout = 0
+
+        [session_server]
+          session_timeout = 1800
+
+        [[runners]]
+          name = "docker"
+          url = "http://{{ gitlab_instance_fqdn }}"
+          id = 8
+          token = "{{ declare_docker_runners_retrurn.json.token }}"
+          token_obtained_at = 2023-11-07T16:26:09Z
+          token_expires_at = 0001-01-01T00:00:00Z
+          executor = "docker"
+          environment = ["DOCKER_TLS_CERTDIR="]
+          [runners.cache]
+            MaxUploadedArchiveSize = 0
+          [runners.docker]
+            tls_verify = true
+            tls_cert_path  = "/etc/gitlab-runner/certs"
+            image = "ruby:2.7"
+            privileged = false
+            disable_entrypoint_overwrite = false
+            oom_kill_disable = false
+            disable_cache = false
+            volumes = ["/var/run/docker.sock:/var/run/docker.sock","/opt/gitlab-runner/cache:/cache:rw"]
+            shm_size = 0
+            network_mtu = 0
+            network_mode = "host"
+    tags: ['runners']
+
+  - name: start gitlab-runner
+    shell: |
+      cd {{ gitlab_install_path }}
+      docker compose up -d gitlab-runner
+    tags: ['runners']
+
+
+
+
+
+  - name: remove token used during install
+    shell: |
+      #!/bin/bash
+      gitlab_host="http://{{ gitlab_instance_fqdn }}"
+      gitlab_user="root"
+      gitlab_password='{{ get_password.stdout | urlencode  }}'
+
+      csrf_token=$(curl -H 'user-agent: curl' -b /tmp/cookies.txt -i "${gitlab_host}/-/profile/personal_access_tokens" -s \
+          | grep "name=\"csrf-token\" content=\""\
+          | sed "s/.*name=\"csrf-token\" content=\"\([^\"]*\).*/\1/g")
+
+      curl -L -b /tmp/cookies.txt "http://{{ gitlab_instance_fqdn }}/-/profile/personal_access_tokens/{{ item.id }}/revoke" \
+          --data-urlencode "authenticity_token=${csrf_token}" \
+          --data-urlencode "_method=put"
+    loop: "{{ (create_pat_return.stdout_lines | last | from_json).active_access_tokens | selectattr('name','==','golab-generated') | list   }}"
+    delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
+    become: "{{  false if gitlab_location == 'remote' else true }}"
