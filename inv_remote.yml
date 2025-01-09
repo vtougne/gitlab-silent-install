@@ -1,0 +1,22 @@
+---
+
+gitlab_target:
+  hosts:
+    remote-gitlab:
+      ansible_ssh_port: 2222
+      gitlab_location: remote
+      gitlab_image: gitlab/gitlab-ce:17.4.6-ce.0
+      gitlab_ssh_port_mapping: "22:22"
+      ansible_user: vince
+
+  vars:
+    ansible_ssh_private_key_file: /home/{{ ansible_user }}/.ssh/id_rsa
+    gitlab_instance_fqdn: "{{ inventory_hostname }}.me"
+    # gitlab_instance_fqdn: gitlab-1.me
+    gitlab_registry: "registry.{{ gitlab_instance_fqdn }}"
+    gitlab_install_base_path: /srv
+    gitlab_instance_name: "{{ gitlab_instance_fqdn.split('.')[0] }}"
+    gitlab_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}"
+    gitlab_runner_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}_runner"
+    gitlab_api_url: http://{{ gitlab_instance_fqdn }}/api/v4
+    git_project_name: "install_{{ gitlab_instance_name }}_demo"
