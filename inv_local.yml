@@ -2,7 +2,7 @@
 
 gitlab_target:
   hosts:
-    local-gitlab:
+    my-gitlab.me:
       ansible_ssh_port: 22
       gitlab_location: local
       gitlab_image: 'yrzr/gitlab-ce-arm64v8'

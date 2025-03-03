@@ -1,11 +1,13 @@
 # - hosts: "{{ hosts | default('localhost') }}"
 - hosts: gitlab_target
-  gather_facts: true
+  gather_facts: false
+  connection: local
   become: true
   vars:
     ansible_user: vince
     ansible_ssh_private_key_file: /home/vince/.ssh/id_rsa
-    gitlab_instance_fqdn: "{{ inventory_hostname }}.me"
+    # gitlab_instance_fqdn: "{{ inventory_hostname }}.me"
+    gitlab_instance_fqdn: "{{ inventory_hostname }}"
     # gitlab_instance_fqdn: gitlab-1.me
     gitlab_registry: "registry.{{ gitlab_instance_fqdn }}"
     gitlab_install_base_path: /srv
@@ -29,15 +31,22 @@
   # - debug: var=setup_return
 
   - block:
+    - setup:
+      ignore_unreachable: true
+      register: setup_return
+      ignore_errors: true
+    - debug: var=setup_return
+    - fail:
+      when: setup_return is unreachable
     - name: check gitlab instance fqdn
       shell: ping -c 1 {{ gitlab_instance_fqdn }}
-      register: ping_return
+      # register: ping_return
       changed_when: false
       delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
       become: "{{  false if gitlab_location == 'remote' else true }}"
     - name: check gitlab registry fqdn
       shell: ping -c 1 {{ gitlab_registry }}
-      register: ping_return
+      # register: ping_return
       changed_when: false
       delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
       become: "{{  false if gitlab_location == 'remote' else true }}"
@@ -50,7 +59,7 @@
           127.0.0.1       {{ gitlab_instance_fqdn }}     {{ gitlab_registry }}
 
           #  for remote instance
-          {{ ansible_default_ipv4.address }}    {{ gitlab_instance_fqdn }}     {{ gitlab_registry }}
+          {{ ansible_default_ipv4.address | default('XXX.XXX.XXX.XXX')}}    {{ gitlab_instance_fqdn }}     {{ gitlab_registry }}
       failed_when: true
 
 
