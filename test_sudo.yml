@@ -1,0 +1,7 @@
+- hosts: localhost
+  become: yes
+  become_user: root
+  become_method: sudo
+  tasks:
+
+  - shell: hostname
