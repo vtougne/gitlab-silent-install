@@ -2,19 +2,19 @@
 
 gitlab_target:
   hosts:
-    my-gitlab.me:
+    local-gitlab:
       ansible_ssh_port: 22
       gitlab_location: local
-      gitlab_image: 'yrzr/gitlab-ce-arm64v8'
+      gitlab_image: 'gitlab/gitlab-ce:17.7.0-ce.0'
       gitlab_ssh_port_mapping: "22:22"
 
   vars:
-    ansible_user: vince
+    gitlab_install_base_path: /srv
+    ansible_user: "{{ lookup('env', 'USER') | default('vince') }}"
     ansible_ssh_private_key_file: /home/vince/.ssh/id_rsa
     gitlab_instance_fqdn: "{{ inventory_hostname }}.me"
     # gitlab_instance_fqdn: gitlab-1.me
     gitlab_registry: "registry.{{ gitlab_instance_fqdn }}"
-    gitlab_install_base_path: /srv
     gitlab_instance_name: "{{ gitlab_instance_fqdn.split('.')[0] }}"
     gitlab_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}"
     gitlab_runner_install_path: "{{ gitlab_install_base_path }}/{{ gitlab_instance_name }}_runner"

@@ -56,6 +56,11 @@ Test Docker registry login:
 echo 'PASSWORD' | docker login registry.HOSTNAME.me --username root --password-stdin
 ```
 
+Test GitLab API connectivity:
+```bash
+curl -H "Content-Type: application/json" http://local-gitlab.me/api/v4/projects
+```
+
 ## Key Variables
 
 The playbook uses these important variables defined in inventory files:
