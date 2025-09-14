@@ -121,15 +121,31 @@
   - name: wait for gitlab healthy
     shell: "docker ps -f name={{ gitlab_instance_name }} -f health=healthy -q"
     register: get_gitlab_health
-    delay: 10
+    delay: 15
     retries: 100
     until: get_gitlab_health.stdout != ""
 
+  - name: wait for gitlab web interface to respond
+    uri:
+      url: "http://{{ gitlab_instance_fqdn }}"
+      status_code: [200, 302]
+      timeout: 30
+    register: gitlab_web_check
+    delay: 15
+    retries: 20
+    until: gitlab_web_check.status in [200, 302]
+
+  # - name: get first password
+  #   shell: "docker exec -t {{ gitlab_instance_name }} gitlab-rake gitlab:password:reset[root] 2>/dev/null | grep 'Password successfully changed for user with username root.' || docker exec -t {{ gitlab_instance_name }} cat /etc/gitlab/initial_root_password 2>/dev/null | grep 'Password:' | awk '{print $2}' || echo 'changeme123'"
+  #   register: get_password
+  #   tags: ['always']
+  
   - name: get first password
     shell: "docker exec -t {{ gitlab_instance_name }} grep 'Password:' /etc/gitlab/initial_root_password | awk '{print $2}'"
     register: get_password
     tags: ['always']
-  
+
+
   - debug: var=get_password.stdout
 
     # sources: https://gist.github.com/michaellihs/5ef5e8dbf48e63e2172a573f7b32c638
@@ -164,7 +180,7 @@
     register: create_pat_return
     tags: ['always']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
   # - debug:
   #     msg: "{{ (create_pat_return.stdout_lines | last | from_json).active_access_tokens | json_query('[?name == `golab-generated`].id') }}"
   
@@ -200,9 +216,7 @@
   - when: stat_gitlab_cert_return.stat.exists == False
     block:
     - name: create ssl folder
-      file:
-        state: directory
-        path: "{{ gitlab_install_path }}/config/ssl"
+      shell: "docker exec -t {{ gitlab_instance_name }} mkdir -p /etc/gitlab/ssl"
       tags: ['certs']
     
     - name: Generate ceriticates on gitlab host
@@ -217,22 +231,39 @@
   
 
   - name: setup gitlab registry on gitlab config
-    blockinfile:
-      insertbefore: BOF
-      path: "{{ gitlab_install_path }}/config/gitlab.rb"
-      backup: yes
-      content: |
-        gitlab_rails['gitlab_default_projects_features_container_registry'] = true
-        registry_external_url 'https://{{ gitlab_registry }}'
+    shell: |
+      # Backup the current config
+      docker exec -t {{ gitlab_instance_name }} cp /etc/gitlab/gitlab.rb /etc/gitlab/gitlab.rb.backup
 
-        gitlab_rails['registry_enabled'] = true
-        gitlab_rails['registry_host'] = "{{ gitlab_registry }}"
+      # Remove existing registry configuration lines and save clean version
+      docker exec -t {{ gitlab_instance_name }} sh -c "
+      sed -i '/^gitlab_rails\[.gitlab_default_projects_features_container_registry.\]/d' /etc/gitlab/gitlab.rb
+      sed -i '/^registry_external_url/d' /etc/gitlab/gitlab.rb
+      sed -i '/^gitlab_rails\[.registry_enabled.\]/d' /etc/gitlab/gitlab.rb
+      sed -i '/^gitlab_rails\[.registry_host.\]/d' /etc/gitlab/gitlab.rb
+      sed -i '/^registry_nginx\[.enable.\]/d' /etc/gitlab/gitlab.rb
+      sed -i '/^registry_nginx\[.listen_port.\]/d' /etc/gitlab/gitlab.rb
+      sed -i '/^nginx\[.ssl_certificate/d' /etc/gitlab/gitlab.rb
+      "
 
-        registry_nginx['enable'] = true
-        registry_nginx['listen_port'] = 443
+      # Create registry config and insert at top
+      docker exec -t {{ gitlab_instance_name }} sh -c "cat > /tmp/registry_config.txt << 'EOF'
+      gitlab_rails['gitlab_default_projects_features_container_registry'] = true
+      registry_external_url 'https://{{ gitlab_registry }}'
 
-        nginx['ssl_certificate'] = "/etc/gitlab/ssl/{{ gitlab_registry }}.crt"
-        nginx['ssl_certificate_key'] = "/etc/gitlab/ssl/{{ gitlab_registry }}.key"
+      gitlab_rails['registry_enabled'] = true
+      gitlab_rails['registry_host'] = '{{ gitlab_registry }}'
+
+      registry_nginx['enable'] = true
+      registry_nginx['listen_port'] = 443
+
+      nginx['ssl_certificate'] = '/etc/gitlab/ssl/{{ gitlab_registry }}.crt'
+      nginx['ssl_certificate_key'] = '/etc/gitlab/ssl/{{ gitlab_registry }}.key'
+
+      EOF"
+
+      # Insert registry config at beginning of file
+      docker exec -t {{ gitlab_instance_name }} sh -c "cat /tmp/registry_config.txt /etc/gitlab/gitlab.rb > /tmp/gitlab.rb.new && mv /tmp/gitlab.rb.new /etc/gitlab/gitlab.rb"
     tags: ['certs']
     register: set_registry
 
@@ -263,7 +294,7 @@
     retries: 10
     tags: ['always']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
   
   # - debug: var=get_projects
   # - meta: end_play
@@ -290,7 +321,7 @@
     when: git_project_name not in (get_projects.json | map(attribute='name'))
     tags: ['projects','always']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
 
   
   - name: set git_project and git_project_url vars
@@ -319,7 +350,7 @@
     register: list_project_files
     tags: ['projects']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
   # - debug:  var=list_project_files.json
   # - debug:  var=gitlab_api_url
 
@@ -374,7 +405,7 @@
           RUN apt-get update \
               && apt-get install -y nginx
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
 
   - name: test docker registry connection
     shell: "echo '{{ get_password.stdout }}' | docker login {{ gitlab_registry }} --username root --password-stdin"
@@ -395,7 +426,7 @@
     register: list_existing_runners_with_docker_tag
     tags: ['runners']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
 
   - debug: var=list_existing_runners_with_docker_tag
 
@@ -414,7 +445,7 @@
     loop: "{{ list_existing_runners_with_docker_tag.json }}"
     tags: ['runners']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
   # - meta: end_play
 
 
@@ -438,7 +469,7 @@
     register: declare_docker_runners_retrurn
     tags: ['runners']
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
 
   - debug: var=declare_docker_runners_retrurn.json.token
     tags: ['runners']
@@ -511,4 +542,4 @@
           --data-urlencode "_method=put"
     loop: "{{ (create_pat_return.stdout_lines | last | from_json).active_access_tokens | selectattr('name','==','golab-generated') | list   }}"
     delegate_to: "{{  'localhost' if gitlab_location == 'remote' else omit }}"
-    become: "{{  false if gitlab_location == 'remote' else true }}"
+    become: false
