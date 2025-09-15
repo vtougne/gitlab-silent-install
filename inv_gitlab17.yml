@@ -5,7 +5,8 @@ gitlab_target:
     local-gitlab17:
       ansible_ssh_port: 22
       gitlab_location: local
-      gitlab_image: 'yrzr/gitlab-ce-arm64v8:latest'
+      gitlab_image: 'yrzr/gitlab-ce-arm64v8:17.7.0-ce.0'
+      # gitlab_image: 'yrzr/gitlab-ce-arm64v8:latest'
       gitlab_ssh_port_mapping: "1722:22"
 
   vars:
