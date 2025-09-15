@@ -36,10 +36,39 @@ Exampe for a given host named my_host
 
 ## Install
 
+### Local Installation
+
+For local GitLab installation:
+
 ```bash
 export ANSIBLE_STDOUT_CALLBACK=yaml
-ansible-playbook play_install_gitlab.yml
+ansible-playbook -i inv_local-gitlab.yml play_install_gitlab.yml --ask-become-pass
 ```
+
+### Remote Installation
+
+For remote server installation:
+
+```bash
+export ANSIBLE_STDOUT_CALLBACK=yaml
+ansible-playbook -i inv_remote.yml play_install_gitlab.yml --ask-become-pass
+```
+
+### Troubleshooting sudo issues
+
+If you encounter `sudo: a password is required` errors, you have two options:
+
+1. **Use --ask-become-pass flag** (recommended for security):
+   The commands above include this flag to prompt for your sudo password.
+
+2. **Configure passwordless sudo for Docker** (less secure):
+   ```bash
+   echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | sudo tee /etc/sudoers.d/docker-nopasswd
+   ```
+   Then run without --ask-become-pass:
+   ```bash
+   ansible-playbook -i inv_local-gitlab.yml play_install_gitlab.yml
+   ```
 
 
 ## Connect
@@ -55,4 +84,21 @@ docker exec -ti local-gitlab bash -c "gitlab-rake 'gitlab:password:reset[root]'<
 ${password}
 ${password}
 EOF"
+```
+
+### Check available GitLab versions
+```bash
+curl -s "https://registry.hub.docker.com/v2/repositories/gitlab/gitlab-ce/tags/?page_size=10" | grep -o '"name":"[^"]*"' | head -10
+```
+
+## Check current version
+```bash
+docker exec local-gitlab gitlab-rake gitlab:env:info
+docker exec local-gitlab gitlab-rake gitlab:env:info | grep "^Version" | head -1
+```
+
+## Check current version
+```bash
+docker exec local-gitlab head -1 /opt/gitlab/version-manifest.txt
+gitlab-ce 17.7.0
 ```
